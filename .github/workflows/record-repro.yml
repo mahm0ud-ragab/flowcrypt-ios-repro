@@ -10,7 +10,10 @@ name: record-path-traversal-repro
 #
 # Required repository secrets:
 #   REPRO_EMAIL        - test Gmail address signed into FlowCrypt
-#   REPRO_PASSWORD     - its Google password (account should have 2FA disabled so OAuth automation works)
+#   REPRO_PASSWORD     - its Google password
+#   REPRO_TOTP_SECRET  - base32 secret of the account's Authenticator-app 2FA
+#                        (Google Account -> Security -> 2-Step Verification ->
+#                        Authenticator app -> "Can't scan it?" -> copy the key)
 #   SMTP_HOST          - SMTP server used to send the crafted email (e.g. smtp.gmail.com)
 #   SMTP_PORT          - 587
 #   SMTP_USER          - SMTP username
@@ -150,6 +153,7 @@ jobs:
         env:
           REPRO_EMAIL: ${{ secrets.REPRO_EMAIL }}
           REPRO_PASSWORD: ${{ secrets.REPRO_PASSWORD }}
+          REPRO_TOTP_SECRET: ${{ secrets.REPRO_TOTP_SECRET }}
           SIM_UDID: ${{ env.SIM_UDID }}
           SIM_IOS_VERSION: ${{ secrets.SIM_IOS_VERSION }}
         run: |
