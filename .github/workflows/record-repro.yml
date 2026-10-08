@@ -55,6 +55,11 @@ jobs:
         working-directory: flowcrypt-ios
         run: |
           set -o pipefail
+          # IMPORTANT: do NOT pass CODE_SIGNING_ALLOWED=NO here.
+          # Xcode ad-hoc signs simulator builds ("Sign to Run Locally"); without
+          # that signature the app's keychain calls fail with
+          # errSecMissingEntitlement (-34018) and the app shows a
+          # "Decryption Error" screen instead of the sign-in screen.
           xcodebuild \
             -project FlowCrypt.xcodeproj \
             -scheme "Debug FlowCrypt" \
@@ -63,8 +68,14 @@ jobs:
             -destination 'generic/platform=iOS Simulator' \
             -derivedDataPath /tmp/dd \
             -skipPackagePluginValidation -skipMacroValidation \
-            CODE_SIGNING_ALLOWED=NO \
             build | tail -40
+
+      - name: Confirm the built app is ad-hoc signed (keychain requirement)
+        run: |
+          APP=/tmp/dd/Build/Products/Debug-iphonesimulator/FlowCrypt.app
+          codesign -dv "$APP" 2>&1 | head -5
+          codesign -d --entitlements - "$APP" 2>&1 | head -20
+          codesign -dv "$APP" >/dev/null 2>&1 || { echo "::error::FlowCrypt.app is not signed - keychain will fail with -34018"; exit 1; }
 
       - name: Install Appium dependencies
         working-directory: flowcrypt-ios/appium
@@ -167,6 +178,13 @@ jobs:
             echo "=== Documents (must NOT contain it) ==="
             ls -la "$CONTAINER/Documents/" | grep poc || echo "confirmed: not in Documents"
           } | tee /tmp/evidence.txt
+          # Be honest about the result: fail the job unless the traversal actually
+          # wrote the file outside Documents/ (artifacts still upload via if: always()).
+          if [ ! -f "$CONTAINER/Library/Preferences/poc.txt" ]; then
+            echo "::error::poc.txt was NOT written to Library/Preferences - path traversal did not happen"
+            exit 1
+          fi
+          echo "SUCCESS: poc.txt written outside Documents/ (path traversal confirmed)"
 
       - name: Upload video + evidence
         uses: actions/upload-artifact@v4
