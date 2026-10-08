@@ -9,6 +9,11 @@ config.suites = {
   repro: ['../tests/specs/repro/**/*.spec.ts'],
 };
 
+// WDA build on a cold runner can take several minutes; the default 400s
+// session-request timeout is too tight even with the pre-built WDA.
+config.connectionRetryTimeout = 1200000;
+config.connectionRetryCount = 1;
+
 // Diagnostics: on any failed test, dump the full UI hierarchy + a screenshot
 // into ./tmp (uploaded with the workflow artifacts) so failures are debuggable.
 const sharedAfterTest = config.afterTest;
