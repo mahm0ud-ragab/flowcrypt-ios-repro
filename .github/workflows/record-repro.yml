@@ -113,6 +113,11 @@ jobs:
           npx appium driver list --installed 2>&1 | tee /tmp/appium-drivers.txt
           grep -q "xcuitest" /tmp/appium-drivers.txt
 
+      - name: Pre-build WebDriverAgent (cold builds overflow the session timeout)
+        working-directory: flowcrypt-ios/appium
+        timeout-minutes: 20
+        run: npx appium driver run xcuitest build-wda
+
       - name: Add repro spec + wdio config
         run: |
           mkdir -p flowcrypt-ios/appium/tests/specs/repro
