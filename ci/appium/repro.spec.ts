@@ -15,6 +15,7 @@
  * /tmp/start_recording and /tmp/stop_recording markers written by this spec.
  */
 import fs from 'fs';
+import { createHmac } from 'crypto';
 import {
   SplashScreen,
   SetupKeyScreen,
@@ -25,6 +26,42 @@ import {
 
 const SUBJECT = 'Weekly report';
 const ATTACHMENT_NAME = '../Library/Preferences/poc.txt';
+
+// --- TOTP (RFC 6238) so the account's Authenticator-app 2FA can be solved
+// from a stored secret (GitHub secret REPRO_TOTP_SECRET) without a human. ---
+function base32Decode(input: string): Buffer {
+  const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
+  const clean = input.replace(/[\s=-]/g, '').toUpperCase();
+  let bits = 0;
+  let value = 0;
+  const out: number[] = [];
+  for (const ch of clean) {
+    const idx = alphabet.indexOf(ch);
+    if (idx === -1) continue;
+    value = (value << 5) | idx;
+    bits += 5;
+    if (bits >= 8) {
+      out.push((value >>> (bits - 8)) & 0xff);
+      bits -= 8;
+    }
+  }
+  return Buffer.from(out);
+}
+
+function generateTotp(secret: string): string {
+  const counter = Math.floor(Date.now() / 1000 / 30);
+  const buf = Buffer.alloc(8);
+  buf.writeUInt32BE(Math.floor(counter / 0x100000000), 0);
+  buf.writeUInt32BE(counter % 0x100000000, 4);
+  const hmac = createHmac('sha1', base32Decode(secret)).update(buf).digest();
+  const offset = hmac[hmac.length - 1] & 0x0f;
+  const code =
+    ((hmac[offset] & 0x7f) << 24) |
+    ((hmac[offset + 1] & 0xff) << 16) |
+    ((hmac[offset + 2] & 0xff) << 8) |
+    (hmac[offset + 3] & 0xff);
+  return String(code % 1000000).padStart(6, '0');
+}
 
 describe('REPRO: attachment filename path traversal', () => {
   it('saves an attachment outside the Documents directory', async () => {
@@ -74,27 +111,121 @@ describe('REPRO: attachment filename path traversal', () => {
       await browser.pause(1500);
     }
 
-    // Wait for the OAuth webview to close. Google may first ask for 2-step
-    // verification ("tap Yes on your phone, then enter this number"): the
-    // account owner approves it on their phone during this 5-minute window.
-    console.log('DIAG: waiting up to 5 min for OAuth to finish (approve the Google prompt on your phone if asked)...');
-    await (await SplashScreen.signInAsGoogleAccounLabel).waitForDisplayed({ reverse: true, timeout: 300000 });
-    console.log('DIAG: OAuth webview closed, login complete');
+    // 2. Complete sign-in. After the password, Google may show (in any order):
+    //    - a re-appearing "Save Password?" sheet (auto-dismissed),
+    //    - 2-step verification: TOTP/authenticator page (code generated from
+    //      REPRO_TOTP_SECRET) or the phone-approval page (logged for manual help),
+    //    - the OAuth consent page (Allow/Continue auto-clicked),
+    //    - then the app's setup screen (success: stop waiting).
+    const totpSecret = process.env.REPRO_TOTP_SECRET as string;
 
-    // 2. First-run setup (mirrors the repo's own setPassPhraseForOtherProviderEmail):
-    //    wait until either a key backup ("load account") or "create new key" appears.
+    const setupElementVisible = async (): Promise<boolean> =>
+      (await (await SetupKeyScreen.loadAccountButton).isDisplayed()) ||
+      (await (await SetupKeyScreen.createNewKeyButton).isDisplayed()) ||
+      (await (await SetupKeyScreen.enterPassPhraseField).isDisplayed());
+
+    const findTotpField = async () => {
+      const candidates = [
+        '~Enter code',
+        '~Enter the code',
+        '~G-',
+        '-ios class chain:**/XCUIElementTypeTextField[1]',
+      ];
+      for (const selector of candidates) {
+        try {
+          const el = await $(selector);
+          if (await el.isDisplayed()) return el;
+        } catch (e) {
+          // ignore
+        }
+      }
+      return null;
+    };
+
+    console.log('DIAG: password submitted, waiting up to 20 min for sign-in to finish...');
     const passPhrase = 'London blueBARREY capi';
-    let count = 0;
-    do {
-      await browser.pause(1000);
-      count++;
-    } while (
-      (await (await SetupKeyScreen.loadAccountButton).isDisplayed()) !== true &&
-      (await (await SetupKeyScreen.createNewKeyButton).isDisplayed()) !== true &&
-      (await (await SetupKeyScreen.enterPassPhraseField).isDisplayed()) !== true &&
-      count <= 90
-    );
+    let setupReady = false;
+    let totpAttempts = 0;
+    let iteration = 0;
+    const deadline = Date.now() + 20 * 60 * 1000;
+    while (Date.now() < deadline) {
+      iteration++;
 
+      if (await setupElementVisible()) {
+        setupReady = true;
+        break;
+      }
+
+      // re-appearing Save Password sheet
+      try {
+        const notNow = await $('~Not Now');
+        if (await notNow.isDisplayed()) {
+          await notNow.click();
+          console.log('DIAG: dismissed Save Password sheet');
+        }
+      } catch (e) {
+        // ignore
+      }
+
+      // OAuth consent page after 2FA
+      for (const selector of ['~Allow', '~Continue']) {
+        try {
+          const btn = await $(selector);
+          if (await btn.isDisplayed()) {
+            console.log(`DIAG: clicking OAuth consent button ${selector}`);
+            await btn.click();
+            await browser.pause(2000);
+          }
+        } catch (e) {
+          // ignore
+        }
+      }
+
+      // 2-step verification (TOTP): generate the code from the stored secret
+      const totpField = await findTotpField();
+      if (totpField && totpSecret && totpAttempts < 4) {
+        const secondsLeft = 30 - (Math.floor(Date.now() / 1000) % 30);
+        if (secondsLeft < 8) {
+          await browser.pause((secondsLeft + 1) * 1000);
+        }
+        const code = generateTotp(totpSecret);
+        console.log('DIAG: 2-step verification page detected, submitting generated TOTP code');
+        await totpField.click();
+        await totpField.setValue(code);
+        await browser.pause(800);
+        await (await SplashScreen.nextButton).click().catch(() => undefined);
+        totpAttempts++;
+        await browser.pause(5000);
+        continue;
+      }
+      if (totpField && !totpSecret) {
+        console.log('DIAG: 2-step verification shown but REPRO_TOTP_SECRET is not set; a human must complete it');
+      }
+
+      // periodic page diagnostics (helps debug unexpected Google pages)
+      if (iteration % 20 === 0) {
+        try {
+          const src = await driver.getPageSource();
+          if (src.includes('Check your')) {
+            const m = src.match(/name="(\d{1,2})"/);
+            console.log(`DIAG: Google phone-approval page shown${m ? `; APPROVAL NUMBER = ${m[1]}` : ''}`);
+          } else if (src.includes('Enter code') || src.includes('authenticator')) {
+            console.log('DIAG: Google authenticator (TOTP) page shown');
+          } else if (src.includes('wants access') || src.includes('wants to access')) {
+            console.log('DIAG: Google OAuth consent page shown');
+          } else {
+            console.log('DIAG: waiting for sign-in (page source length', src.length + ')');
+          }
+        } catch (e) {
+          // ignore
+        }
+      }
+
+      await browser.pause(3000);
+    }
+    console.log('DIAG: sign-in wait finished, setup screen detected:', setupReady);
+
+    // 3. First-run setup (mirrors the repo's own setPassPhraseForOtherProviderEmail):
     if ((await (await SetupKeyScreen.enterPassPhraseField).isDisplayed()) !== true) {
       // no key backups found -> create a fresh key
       await SetupKeyScreen.clickCreateNewKeyButton();
