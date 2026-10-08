@@ -48,6 +48,9 @@ jobs:
           sudo xcode-select -s "$XCODE_APP"
           xcodebuild -version
 
+      - name: Rewrite GitHub SSH URLs to HTTPS (submodules on the runner have no SSH key)
+        run: git config --global url."https://github.com/".insteadOf "git@github.com:"
+
       - name: Build official app for the iOS Simulator (no modifications)
         working-directory: flowcrypt-ios
         run: |
