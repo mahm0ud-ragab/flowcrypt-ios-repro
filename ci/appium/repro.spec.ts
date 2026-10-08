@@ -51,7 +51,13 @@ describe('REPRO: attachment filename path traversal', () => {
     } catch (e) {
       console.log('DIAG: no system consent alert appeared, continuing');
     }
-    await SplashScreen.changeLanguage();
+    try {
+      await SplashScreen.changeLanguage();
+    } catch (e) {
+      // Google's language footer is often below the fold in CI; the page is
+      // served in English for the en-US simulator anyway, so continue.
+      console.log('DIAG: language step skipped (selector not reachable)');
+    }
     await SplashScreen.gmailLogin(email, password);
     await ElementHelper.waitElementInvisible(await SplashScreen.signInAsGoogleAccounLabel);
 
