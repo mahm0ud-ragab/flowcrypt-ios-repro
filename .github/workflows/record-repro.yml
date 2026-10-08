@@ -70,6 +70,12 @@ jobs:
         working-directory: flowcrypt-ios/appium
         run: npm install
 
+      - name: Install Appium XCUITest driver
+        working-directory: flowcrypt-ios/appium
+        run: |
+          npx appium driver install --source=npm appium-xcuitest-driver@12.1.0
+          npx appium driver list --installed
+
       - name: Add repro spec + wdio config
         run: |
           mkdir -p flowcrypt-ios/appium/tests/specs/repro
@@ -145,3 +151,4 @@ jobs:
             /tmp/evidence.txt
             flowcrypt-ios/appium/tmp
           if-no-files-found: warn
+          if: always()
