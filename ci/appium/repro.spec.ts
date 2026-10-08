@@ -15,6 +15,7 @@
  * /tmp/start_recording and /tmp/stop_recording markers written by this spec.
  */
 import fs from 'fs';
+import ElementHelper from '../../helpers/ElementHelper';
 import {
   SplashScreen,
   SetupKeyScreen,
@@ -41,8 +42,18 @@ describe('REPRO: attachment filename path traversal', () => {
     await (await $('~aid-sign-in-gmail-btn')).waitForDisplayed({ timeout: 120000 });
     console.log('DIAG: sign-in screen is up');
 
-    // 1. Real Gmail OAuth login (no mocks)
-    await SplashScreen.login(email, password);
+    // 1. Real Gmail OAuth login. Same flow as the official SplashScreen.login,
+    //    but tolerant of the system consent alert ("...Wants to Use google.com
+    //    to Sign In") being absent in the CI environment.
+    await SplashScreen.clickContinueWithGmail();
+    try {
+      await SplashScreen.clickContinueBtn();
+    } catch (e) {
+      console.log('DIAG: no system consent alert appeared, continuing');
+    }
+    await SplashScreen.changeLanguage();
+    await SplashScreen.gmailLogin(email, password);
+    await ElementHelper.waitElementInvisible(await SplashScreen.signInAsGoogleAccounLabel);
 
     // 2. First-run setup (mirrors the repo's own setPassPhraseForOtherProviderEmail):
     //    wait until either a key backup ("load account") or "create new key" appears.
