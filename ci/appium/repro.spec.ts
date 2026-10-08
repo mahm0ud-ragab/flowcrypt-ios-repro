@@ -15,7 +15,6 @@
  * /tmp/start_recording and /tmp/stop_recording markers written by this spec.
  */
 import fs from 'fs';
-import ElementHelper from '../../helpers/ElementHelper';
 import {
   SplashScreen,
   SetupKeyScreen,
@@ -59,7 +58,28 @@ describe('REPRO: attachment filename path traversal', () => {
       console.log('DIAG: language step skipped (selector not reachable)');
     }
     await SplashScreen.gmailLogin(email, password);
-    await ElementHelper.waitElementInvisible(await SplashScreen.signInAsGoogleAccounLabel);
+
+    // Dismiss the iOS "Save Password?" sheet if it pops up after submitting.
+    for (let i = 0; i < 4; i++) {
+      try {
+        const notNow = await $('~Not Now');
+        if (await notNow.isDisplayed()) {
+          await notNow.click();
+          console.log('DIAG: dismissed Save Password sheet');
+          break;
+        }
+      } catch (e) {
+        // ignore
+      }
+      await browser.pause(1500);
+    }
+
+    // Wait for the OAuth webview to close. Google may first ask for 2-step
+    // verification ("tap Yes on your phone, then enter this number"): the
+    // account owner approves it on their phone during this 5-minute window.
+    console.log('DIAG: waiting up to 5 min for OAuth to finish (approve the Google prompt on your phone if asked)...');
+    await (await SplashScreen.signInAsGoogleAccounLabel).waitForDisplayed({ reverse: true, timeout: 300000 });
+    console.log('DIAG: OAuth webview closed, login complete');
 
     // 2. First-run setup (mirrors the repo's own setPassPhraseForOtherProviderEmail):
     //    wait until either a key backup ("load account") or "create new key" appears.
