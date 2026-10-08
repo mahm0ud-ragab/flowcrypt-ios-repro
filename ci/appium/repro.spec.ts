@@ -94,7 +94,101 @@ describe('REPRO: attachment filename path traversal', () => {
       // served in English for the en-US simulator anyway, so continue.
       console.log('DIAG: language step skipped (selector not reachable)');
     }
-    await SplashScreen.gmailLogin(email, password);
+
+    // Tolerant Gmail login. The official SplashScreen.gmailLogin depends on a
+    // keyboard "Done" button that does not exist on some iOS builds (the web
+    // form accessory renders as an icon), which aborted a run. Fall back
+    // through keyboard keys / hideKeyboard / a background tap before clicking
+    // the page's Next button.
+    const typeText = async (selector: string, value: string) => {
+      const field = await $(selector);
+      await field.waitForDisplayed({ timeout: 60000 });
+      await field.click();
+      await field.setValue(value);
+      await browser.pause(700);
+    };
+
+    const dismissKeyboardTolerant = async () => {
+      // The web-form keyboard on this iOS build has no "Done" button (the
+      // accessory renders as an icon and "~Done" does not exist). WDA can
+      // still find and press the form's submit key natively ("go"/"Return"),
+      // which also advances the form.
+      try {
+        await driver.execute('mobile: hideKeyboard', {
+          keys: [
+            'go', 'Go', 'next', 'Next', 'return', 'Return',
+            'continue', 'Continue', 'search', 'Search', 'done', 'Done',
+          ],
+        });
+        console.log('DIAG: keyboard dismissed / submit key pressed');
+        await browser.pause(1200);
+        return;
+      } catch (e) {
+        console.log('DIAG: mobile: hideKeyboard failed, falling back to background tap');
+      }
+      try {
+        const { width, height } = await driver.getWindowSize();
+        await driver.performActions([
+          {
+            id: 'dismissKb',
+            type: 'pointer',
+            parameters: { pointerType: 'touch' },
+            actions: [
+              { duration: 0, x: Math.round(width / 2), y: Math.round(height * 0.3), type: 'pointerMove', origin: 'viewport' },
+              { button: 0, type: 'pointerDown' },
+              { type: 'pause', duration: 100 },
+              { button: 0, type: 'pointerUp' },
+            ],
+          },
+        ]);
+        console.log('DIAG: tapped page background to dismiss keyboard');
+        await browser.pause(800);
+      } catch (e) {
+        // ignore
+      }
+    };
+
+    const clickNextIfVisible = async () => {
+      try {
+        const next = await $('-ios class chain:**/XCUIElementTypeButton[`label == "Next"`][1]');
+        if (await next.isDisplayed()) {
+          await next.click();
+          console.log('DIAG: clicked page Next');
+          await browser.pause(1500);
+          return true;
+        }
+      } catch (e) {
+        // ignore
+      }
+      return false;
+    };
+
+    await (await SplashScreen.signInAsGoogleAccounLabel).waitForDisplayed({ timeout: 60000 });
+    await browser.pause(1000);
+
+    // previously-used account chip, if Google shows one
+    const accountChip = await $(`-ios class chain:**/XCUIElementTypeLink/XCUIElementTypeStaticText[\`label == "${email}"\`]`);
+    if (await accountChip.isDisplayed().catch(() => false)) {
+      await accountChip.click();
+      await browser.pause(1500);
+    }
+
+    if (await (await SplashScreen.loginField).isDisplayed()) {
+      await typeText('~Email or phone', email);
+      await dismissKeyboardTolerant();
+      if (!(await (await SplashScreen.passwordField).isDisplayed())) {
+        await clickNextIfVisible();
+      }
+    }
+
+    const passwordField = await SplashScreen.passwordField;
+    await passwordField.waitForDisplayed({ timeout: 60000 });
+    await typeText('~Enter your password', password);
+    await dismissKeyboardTolerant();
+    if (await (await SplashScreen.passwordField).isDisplayed().catch(() => false)) {
+      await clickNextIfVisible();
+    }
+    console.log('DIAG: password submitted');
 
     // Dismiss the iOS "Save Password?" sheet if it pops up after submitting.
     for (let i = 0; i < 4; i++) {
