@@ -70,11 +70,37 @@ jobs:
         working-directory: flowcrypt-ios/appium
         run: npm install
 
-      - name: Install Appium XCUITest driver
+      - name: Fix Appium driver dependency (bplist-parser ESM interop bug)
         working-directory: flowcrypt-ios/appium
         run: |
-          npx appium driver install --source=npm appium-xcuitest-driver@12.1.0
-          npx appium driver list --installed
+          # The repo lockfile hoists bplist-parser@0.5.0, a dual ESM/CJS build with
+          # __esModule=true and no `default` export. appium-ios-device@3.1.19 ships
+          # compiled code that reads `bplist_parser_1.default.UID` at require time,
+          # so Appium crashes while loading the XCUITest driver with:
+          #   TypeError: Cannot read properties of undefined (reading 'UID')
+          # and then reports "Could not find a driver for automationName 'XCUITest'".
+          # Test-harness-only fix (the app binary is untouched): shadow the hoisted
+          # 0.5.0 with the last CommonJS build, 0.3.2, for appium-ios-device only.
+          FOUND=0
+          for PKGJSON in $(find node_modules -maxdepth 5 -type f -path '*/appium-ios-device/package.json'); do
+            AIO_DIR=$(dirname "$PKGJSON")
+            echo "Patching $AIO_DIR"
+            mkdir -p "$AIO_DIR/node_modules/bplist-parser" "$AIO_DIR/node_modules/big-integer"
+            curl -fsSL "https://registry.npmjs.org/bplist-parser/-/bplist-parser-0.3.2.tgz" | tar xz -C "$AIO_DIR/node_modules/bplist-parser" --strip-components=1
+            curl -fsSL "https://registry.npmjs.org/big-integer/-/big-integer-1.6.52.tgz" | tar xz -C "$AIO_DIR/node_modules/big-integer" --strip-components=1
+            node -e "require('$(pwd)/$AIO_DIR/build/lib/instrument/transformer/nskeyed.js'); console.log('driver dependency loads OK')"
+            FOUND=$((FOUND + 1))
+          done
+          if [ "$FOUND" -eq 0 ]; then
+            echo "::error::appium-ios-device was not found under node_modules"
+            exit 1
+          fi
+
+      - name: Verify Appium detects the XCUITest driver
+        working-directory: flowcrypt-ios/appium
+        run: |
+          npx appium driver list --installed 2>&1 | tee /tmp/appium-drivers.txt
+          grep -q "xcuitest" /tmp/appium-drivers.txt
 
       - name: Add repro spec + wdio config
         run: |
@@ -144,6 +170,7 @@ jobs:
 
       - name: Upload video + evidence
         uses: actions/upload-artifact@v4
+        if: always()
         with:
           name: repro-video-and-evidence
           path: |
@@ -151,4 +178,3 @@ jobs:
             /tmp/evidence.txt
             flowcrypt-ios/appium/tmp
           if-no-files-found: warn
-          if: always()
