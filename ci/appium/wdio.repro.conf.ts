@@ -46,7 +46,6 @@ config.capabilities = [
     'appium:wdaConnectionTimeout': 600000,
     'appium:simulatorStartupTimeout': 600000,
     'appium:reduceMotion': true,
-    'appium:autoAcceptAlerts': true,
   },
 ];
 
