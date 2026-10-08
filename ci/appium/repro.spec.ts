@@ -34,6 +34,13 @@ describe('REPRO: attachment filename path traversal', () => {
     expect(email).toBeTruthy();
     expect(password).toBeTruthy();
 
+    // 0. Wait for the freshly installed app to boot all the way to the
+    //    sign-in screen. First launch of a debug build on a cold simulator
+    //    can take well over the default 15s.
+    console.log('DIAG: waiting for the app sign-in screen...');
+    await (await $('~aid-sign-in-gmail-btn')).waitForDisplayed({ timeout: 120000 });
+    console.log('DIAG: sign-in screen is up');
+
     // 1. Real Gmail OAuth login (no mocks)
     await SplashScreen.login(email, password);
 
